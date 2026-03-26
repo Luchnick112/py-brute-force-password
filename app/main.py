@@ -4,7 +4,9 @@ import multiprocessing
 import time
 from hashlib import sha256
 import threading
-from multiprocessing import cpu_count, Process, Pipe, Event
+from multiprocessing import cpu_count, Process, Pipe, Event, Queue
+from multiprocessing.connection import wait
+from queue import Empty
 
 PASSWORDS_TO_BRUTE_FORCE = [
     "b4061a4bcfe1a2cbf78286f3fab2fb578266d1bd16c414c650c5ac04dfc696e1",
@@ -85,11 +87,12 @@ def sha256_hash_str(to_hash: str) -> str:
 #     return list(found.values())
 
 
-def worker(start, end, target_hashes, conn, stop_event):
-    local_found = []
 
+def worker(start, end, target_hashes, queue, stop_event):
+    local_found = []
     for num in range(start, end):
-        if num % 5000 == 0 and stop_event.is_set():
+        # Перевірка stop_event на кожній ітерації
+        if stop_event.is_set():
             break
 
         pwd = str(num).zfill(8)
@@ -99,49 +102,51 @@ def worker(start, end, target_hashes, conn, stop_event):
             print(f"[FOUND] {pwd}")
             local_found.append(pwd)
 
-    conn.send(local_found)
-    conn.close()
-
+    # Відправляємо тільки якщо щось знайшли
+    if local_found:
+        queue.put(local_found)
 
 def brute_force_multiprocessing(passwords):
     target_hashes = set(passwords)
-
     total = 100_000_000
     num_proc = cpu_count()
     chunk = total // num_proc
 
     stop_event = Event()
-
-    pipes = []
+    queue = Queue()
     processes = []
 
+    # Запуск процесів
     for i in range(num_proc):
         start = i * chunk
         end = (i + 1) * chunk if i != num_proc - 1 else total
-
-        parent_conn, child_conn = Pipe()
-
-        p = Process(
-            target=worker,
-            args=(start, end, target_hashes, child_conn, stop_event),
-        )
+        p = Process(target=worker, args=(start, end, target_hashes, queue, stop_event))
         processes.append(p)
-        pipes.append(parent_conn)
-
         p.start()
 
-    found = []
+    found = set()
 
-    for conn in pipes:
-        found.extend(conn.recv())
+    # Основний цикл
+    while len(found) < len(target_hashes):
+        try:
+            result = queue.get(timeout=0.5)
+            found.update(result)  # дедуплікація через set
+            if len(found) >= len(target_hashes):
+                stop_event.set()
+                break
+        except Empty:
+            # Якщо всі процеси завершились і черга порожня — вихід
+            if not any(p.is_alive() for p in processes):
+                break
+            continue
 
-    if len(found) >= len(target_hashes):
-        stop_event.set()
-
+    # Завершення процесів
     for p in processes:
-        p.join()
+        p.join(timeout=1)
+        if p.is_alive():
+            p.terminate()
 
-    return found
+    return list(found)
 
 # async def worker(start, end, target_hashes, found, stop_event):
 #     for num in range(start, end):
