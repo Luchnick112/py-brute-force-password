@@ -1,6 +1,10 @@
+import asyncio
+import hashlib
+import multiprocessing
 import time
 from hashlib import sha256
-
+import threading
+from multiprocessing import cpu_count, Process, Pipe, Event
 
 PASSWORDS_TO_BRUTE_FORCE = [
     "b4061a4bcfe1a2cbf78286f3fab2fb578266d1bd16c414c650c5ac04dfc696e1",
@@ -20,13 +24,176 @@ def sha256_hash_str(to_hash: str) -> str:
     return sha256(to_hash.encode("utf-8")).hexdigest()
 
 
-def brute_force_password() -> None:
-    pass
+# def brute_force_password(passwords: list) -> list:
+#     count = 0
+#     length = len(passwords)
+#     passwords = set(passwords)
+#     for num in range(100000000):
+#         check_pwd = str(num).zfill(8)
+#         decoded_password = sha256_hash_str(check_pwd)
+#         if decoded_password in passwords:
+#             print(check_pwd)
+#             count += 1
+#             if count == length:
+#                 break
 
+
+# def worker(start, end, target_hashes, found, lock, stop_event):
+#     for num in range(start, end):
+#         if stop_event.is_set():
+#             return
+#
+#         pwd = str(num).zfill(8)
+#         hashed_pwd = sha256(pwd.encode()).hexdigest()
+#
+#         if hashed_pwd in target_hashes:
+#             with lock:
+#                 if hashed_pwd not in found:
+#                     found[hashed_pwd] = pwd
+#                     print({pwd})
+#
+#                     if len(found) == len(target_hashes):
+#                         stop_event.set()
+#                         return
+#
+#
+# def brute_force_threading(passwords, num_threads=4):
+#     target_hashes = set(passwords)
+#     found = {}
+#
+#     lock = threading.Lock()
+#     stop_event = threading.Event()
+#
+#     threads = []
+#     total = 100_000_000
+#     chunk = total // num_threads
+#
+#     for i in range(num_threads):
+#         start = i * chunk
+#         end = (i + 1) * chunk if i != num_threads - 1 else total
+#
+#         t = threading.Thread(
+#             target=worker,
+#             args=(start, end, target_hashes, found, lock, stop_event)
+#         )
+#         threads.append(t)
+#         t.start()
+#
+#     for t in threads:
+#         t.join()
+#
+#     return list(found.values())
+
+
+def worker(start, end, target_hashes, conn, stop_event):
+    local_found = []
+
+    for num in range(start, end):
+        if num % 5000 == 0 and stop_event.is_set():
+            break
+
+        pwd = str(num).zfill(8)
+        h = sha256_hash_str(pwd)
+
+        if h in target_hashes:
+            print(f"[FOUND] {pwd}")
+            local_found.append(pwd)
+
+    conn.send(local_found)
+    conn.close()
+
+
+def brute_force_multiprocessing(passwords):
+    target_hashes = set(passwords)
+
+    total = 100_000_000
+    num_proc = cpu_count()
+    chunk = total // num_proc
+
+    stop_event = Event()
+
+    pipes = []
+    processes = []
+
+    for i in range(num_proc):
+        start = i * chunk
+        end = (i + 1) * chunk if i != num_proc - 1 else total
+
+        parent_conn, child_conn = Pipe()
+
+        p = Process(
+            target=worker,
+            args=(start, end, target_hashes, child_conn, stop_event),
+        )
+        processes.append(p)
+        pipes.append(parent_conn)
+
+        p.start()
+
+    found = []
+
+    for conn in pipes:
+        found.extend(conn.recv())
+
+    if len(found) >= len(target_hashes):
+        stop_event.set()
+
+    for p in processes:
+        p.join()
+
+    return found
+
+# async def worker(start, end, target_hashes, found, stop_event):
+#     for num in range(start, end):
+#
+#         if stop_event.is_set():
+#             return
+#
+#         pwd = str(num).zfill(8)
+#         h = hashlib.sha256(pwd.encode()).hexdigest()
+#
+#         if h in target_hashes:
+#             print(f"[FOUND] {pwd}")
+#             found.add(pwd)
+#
+#             if len(found) == len(target_hashes):
+#                 stop_event.set()
+#                 return
+#
+#         if num % 1000 == 0:
+#             await asyncio.sleep(0)
+#
+#
+# async def brute_force_async(passwords):
+#     target_hashes = set(passwords)
+#
+#     total = 100_000_000
+#     num_tasks = 8
+#     chunk = total // num_tasks
+#
+#     found = set()
+#     stop_event = asyncio.Event()
+#
+#     tasks = []
+#
+#     for i in range(num_tasks):
+#         start = i * chunk
+#         end = (i + 1) * chunk if i != num_tasks - 1 else total
+#
+#         tasks.append(
+#             asyncio.create_task(
+#                 worker(start, end, target_hashes, found, stop_event)
+#             )
+#         )
+#
+#     await asyncio.gather(*tasks)
+#
+#     return list(found)
 
 if __name__ == "__main__":
+
     start_time = time.perf_counter()
-    brute_force_password()
+    result = brute_force_multiprocessing(PASSWORDS_TO_BRUTE_FORCE)
     end_time = time.perf_counter()
 
     print("Elapsed:", end_time - start_time)
